@@ -1,0 +1,67 @@
+@import 'tailwindcss';
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #0a0a0c;
+  color: #f2f2f5;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Range inputs are styled per-browser; keep them consistent with the terminal theme. */
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: #2a2a34;
+  outline: none;
+}
+
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: #f2f2f5;
+  border: 3px solid #14141a;
+  box-shadow: 0 0 0 1px #3987e5;
+  cursor: pointer;
+}
+
+input[type='range']::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: #f2f2f5;
+  border: 3px solid #14141a;
+  box-shadow: 0 0 0 1px #3987e5;
+  cursor: pointer;
+}
+
+input[type='range']:focus-visible {
+  box-shadow: 0 0 0 2px #3987e5;
+}
+
+/* Chrome/Safari show spinners that fight the mono alignment. */
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type='number'] {
+  -moz-appearance: textfield;
+}
