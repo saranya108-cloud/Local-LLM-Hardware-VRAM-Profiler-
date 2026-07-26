@@ -478,7 +478,7 @@ export default function App() {
   }, [modelId, customParams, model]);
 
   const capacityGB = hardwareId === 'custom' ? customVram : hardwarePreset.vram;
-  const bandwidth = hardwareId === 'custom' ? customBandwidth : hardwarePreset.bandwidth;
+  const bandwidthGBPerSecond = hardwareId === 'custom' ? customBandwidth : hardwarePreset.bandwidth;
 
   /* ---------------- core calculation ---------------- */
   const calc = useMemo(() => {
@@ -503,22 +503,33 @@ export default function App() {
     const utilisation = (total / capacityGB) * 100;
     const fits = total <= capacityGB;
 
+    // Hardware vendors report decimal GB/s, while weight footprints use GiB.
     // Decode is memory-bandwidth bound: each token streams the weights once.
-    const idealTps = bandwidth / weights;
+    const bandwidthGiBPerSecond = bandwidthGBPerSecond * 1e9 / (1024 ** 3);
+    const idealTps = bandwidthGiBPerSecond / weights;
+
+    // CPU offload can only help when the device-resident KV cache and runtime
+    // memory fit before any model weights are loaded.
+    const nonWeightMemory = kv + overhead;
+    const cpuOffloadPossible = nonWeightMemory <= capacityGB;
 
     // Overflow spills layers to system RAM, so the effective read
     // bandwidth becomes a weighted harmonic mean of VRAM and DDR.
     const overflow = Math.max(0, total - capacityGB);
     const offloadFraction = weights > 0 ? Math.min(1, overflow / weights) : 0;
-    const effectiveBandwidth =
-      offloadFraction > 0
-        ? 1 / ((1 - offloadFraction) / bandwidth + offloadFraction / SYSTEM_RAM_BANDWIDTH)
-        : bandwidth;
-    const tps = effectiveBandwidth / weights;
+    let tps = null;
+    if (cpuOffloadPossible) {
+      const effectiveBandwidthGBPerSecond =
+        offloadFraction > 0
+          ? 1 / ((1 - offloadFraction) / bandwidthGBPerSecond + offloadFraction / SYSTEM_RAM_BANDWIDTH)
+          : bandwidthGBPerSecond;
+      const effectiveBandwidthGiBPerSecond = effectiveBandwidthGBPerSecond * 1e9 / (1024 ** 3);
+      tps = effectiveBandwidthGiBPerSecond / weights;
+    }
 
     // Batched decode amortises the weight read across streams, but
     // attention and scheduling keep it sub-linear.
-    const aggregateTps = tps * Math.pow(batchSize, 0.85);
+    const aggregateTps = tps === null ? null : tps * Math.pow(batchSize, 0.85);
 
     // Largest context that still fits, at the current everything-else.
     const kvSlope = kvPerTokenGB * batchSize * (flashAttention ? 1 : 1.25);
@@ -536,13 +547,16 @@ export default function App() {
       remaining,
       utilisation,
       fits,
+      bandwidthGiBPerSecond,
       idealTps,
       tps,
       aggregateTps,
       offloadFraction,
+      nonWeightMemory,
+      cpuOffloadPossible,
       maxContext,
     };
-  }, [arch, quant, kvPrecision, context, batchSize, flashAttention, capacityGB, bandwidth]);
+  }, [arch, quant, kvPrecision, context, batchSize, flashAttention, capacityGB, bandwidthGBPerSecond]);
 
   /* ---------------- chart data ---------------- */
   const stackData = [
@@ -708,12 +722,21 @@ export default function App() {
         });
       }
 
-      out.push({
-        tone: 'info',
-        icon: HardDrive,
-        title: `Or offload ~${Math.round(calc.offloadFraction * 100)}% of layers to CPU`,
-        detail: `Runs today without changing the model, but decode drops to about ${fmtTps(calc.tps)} tok/s from ${fmtTps(calc.idealTps)} tok/s — system RAM is roughly ${Math.round(bandwidth / SYSTEM_RAM_BANDWIDTH)}× slower than this GPU.`,
-      });
+      if (calc.cpuOffloadPossible) {
+        out.push({
+          tone: 'info',
+          icon: HardDrive,
+          title: `Offload at least ~${Math.ceil(calc.offloadFraction * 100)}% of weights to CPU`,
+          detail: `This can make the memory footprint fit. The resulting theoretical decode ceiling is ≤${fmtTps(calc.tps)} tok/s, versus a fully resident ceiling of ≤${fmtTps(calc.idealTps)} tok/s. These are bandwidth-derived upper bounds, not expected benchmark performance.`,
+        });
+      } else {
+        out.push({
+          tone: 'critical',
+          icon: HardDrive,
+          title: 'CPU offload cannot make this configuration fit',
+          detail: `KV cache plus runtime memory require ${fmtGB(calc.nonWeightMemory)}, exceeding ${fmtGB(capacityGB)} before model weights are loaded. Reduce context, batch size, or KV precision, or select a larger device.`,
+        });
+      }
     } else {
       const headroom = calc.remaining;
 
@@ -752,7 +775,7 @@ export default function App() {
             tone: 'good',
             icon: Layers,
             title: `Serve up to ${Math.min(64, extraStreams + 1)} concurrent streams`,
-            detail: `Free memory covers ${extraStreams} more ${fmtCtx(context)} cache${extraStreams === 1 ? '' : 's'}. Batched decode reuses one weight read per step, so aggregate throughput scales close to linearly.`,
+            detail: `Free memory covers ${extraStreams} more ${fmtCtx(context)} cache${extraStreams === 1 ? '' : 's'}. Batched decode reuses one weight read per step, so the modeled aggregate theoretical ceiling scales sub-linearly.`,
           });
         }
       }
@@ -789,7 +812,7 @@ export default function App() {
     batchSize,
     flashAttention,
     capacityGB,
-    bandwidth,
+    bandwidthGBPerSecond,
   ]);
 
   /* ---------------- feasibility table ---------------- */
@@ -1017,7 +1040,7 @@ export default function App() {
                         Bandwidth
                       </div>
                       <div className="mt-1 font-mono text-sm text-[#f2f2f5] tabular-nums">
-                        {fmtInt(bandwidth)} GB/s
+                        {fmtInt(bandwidthGBPerSecond)} GB/s
                       </div>
                     </div>
                   </div>
@@ -1048,21 +1071,25 @@ export default function App() {
                 sub={
                   calc.remaining >= 0
                     ? `Headroom for prompt bursts and a second process`
-                    : `Over budget — ${Math.round(calc.offloadFraction * 100)}% of weights would spill to CPU`
+                    : calc.cpuOffloadPossible
+                      ? `Over budget — at least ~${Math.ceil(calc.offloadFraction * 100)}% of weights must be offloaded`
+                      : `KV cache + runtime use ${fmtGB(calc.nonWeightMemory)} — CPU offload cannot make it fit`
                 }
               />
               <MetricCard
                 icon={TrendingUp}
-                label="Est. tokens/sec"
-                value={fmtTps(calc.tps)}
-                unit="tok/s"
-                tone={calc.fits ? 'neutral' : 'warning'}
+                label="Theoretical decode ceiling"
+                value={calc.tps === null ? 'N/A' : `≤${fmtTps(calc.tps)}`}
+                unit={calc.tps === null ? undefined : 'tok/s'}
+                tone={calc.tps === null ? 'critical' : calc.fits ? 'neutral' : 'warning'}
                 sub={
                   calc.fits
                     ? batchSize > 1
-                      ? `Single stream · ~${fmtTps(calc.aggregateTps)} tok/s aggregate across ${batchSize} streams`
-                      : `${fmtInt(bandwidth)} GB/s ÷ ${fmtGB(calc.weights)} of weights`
-                    : `Down from ${fmtTps(calc.idealTps)} tok/s — CPU offload dominates`
+                      ? `Bandwidth-derived upper bound; aggregate ceiling ≤${fmtTps(calc.aggregateTps)} tok/s across ${batchSize} streams. Not expected benchmark performance.`
+                      : `${fmtInt(bandwidthGBPerSecond)} decimal GB/s converts to ${calc.bandwidthGiBPerSecond.toFixed(1)} GiB/s. Upper bound only, not expected benchmark performance.`
+                    : calc.cpuOffloadPossible
+                      ? `CPU-offload bandwidth-derived upper bound; fully resident ceiling ≤${fmtTps(calc.idealTps)} tok/s. Not expected benchmark performance.`
+                      : `KV cache plus runtime memory exceed device capacity before weights are loaded.`
                 }
               />
             </div>
@@ -1374,7 +1401,7 @@ export default function App() {
                     <tr className="border-b" style={{ borderColor: T.border }}>
                       <td className="py-2.5 pr-4 font-mono text-xs text-[#f2f2f5]">Hardware capacity</td>
                       <td className="py-2.5 pr-4 text-[11px] text-[#8a8a99]">
-                        {hardwarePreset.label} @ {fmtInt(bandwidth)} GB/s
+                        {hardwarePreset.label} @ {fmtInt(bandwidthGBPerSecond)} GB/s
                       </td>
                       <td className="py-2.5 pr-4 text-right font-mono text-xs text-[#f2f2f5] tabular-nums">
                         {fmtGB(capacityGB)}
@@ -1387,8 +1414,10 @@ export default function App() {
                       <td className="py-2.5 pr-4 font-mono text-xs text-[#f2f2f5]">Verdict</td>
                       <td className="py-2.5 pr-4 text-[11px] text-[#8a8a99]">
                         {calc.fits
-                          ? `Fully resident on device · ${fmtTps(calc.tps)} tok/s single stream`
-                          : `Short by ${fmtGB(Math.abs(calc.remaining))} · requires offload or a smaller footprint`}
+                          ? `Fully resident on device · theoretical decode ceiling ≤${fmtTps(calc.tps)} tok/s`
+                          : calc.cpuOffloadPossible
+                            ? `Short by ${fmtGB(Math.abs(calc.remaining))} · offload at least ~${Math.ceil(calc.offloadFraction * 100)}% of weights · theoretical ceiling ≤${fmtTps(calc.tps)} tok/s`
+                            : `KV cache + runtime require ${fmtGB(calc.nonWeightMemory)} · CPU offload cannot make this configuration fit`}
                       </td>
                       <td colSpan={2} className="py-2.5 text-right">
                         <span
@@ -1430,12 +1459,14 @@ export default function App() {
                   cache as attention scratch when Flash Attention is off.
                 </li>
                 <li>
-                  <span className="text-[#b4b4c2]">Throughput</span> = memory bandwidth ÷ weight footprint — decode
-                  is bandwidth-bound, so this is a ceiling, not a benchmark.
+                  <span className="text-[#b4b4c2]">Theoretical decode ceiling</span> = bandwidth in GiB/s ÷ weight
+                  footprint in GiB. Manufacturer decimal GB/s is converted to GiB/s first. This upper bound is not
+                  expected benchmark performance.
                 </li>
                 <li>
                   <span className="text-[#b4b4c2]">Offload</span> assumes {SYSTEM_RAM_BANDWIDTH} GB/s of system
-                  memory bandwidth for the layers that spill out of VRAM.
+                  memory bandwidth for the weights that spill out of VRAM. It is viable only when KV cache plus
+                  runtime memory fit on the device without model weights.
                 </li>
                 <li>
                   <span className="text-[#b4b4c2]">GB</span> means GiB (2<sup>30</sup> bytes). Unified-memory
