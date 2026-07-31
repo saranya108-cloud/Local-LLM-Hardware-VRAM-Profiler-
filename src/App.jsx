@@ -34,6 +34,12 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import {
+  BASELINE_OVERHEAD_GB,
+  GIB,
+  SYSTEM_RAM_BANDWIDTH_GB_PER_SECOND,
+  calculateProfile,
+} from './calculations.js';
 
 /* ------------------------------------------------------------------ *
  * Design tokens — dark terminal theme.
@@ -59,8 +65,6 @@ const T = {
   warning: '#fab219',
   critical: '#d03b3b',
 };
-
-const GIB = 1024 ** 3;
 
 /* ------------------------------------------------------------------ *
  * Model architectures
@@ -180,11 +184,6 @@ const HARDWARE = [
 ];
 
 const CONTEXT_STEPS = [2048, 4096, 8192, 16384, 32768, 65536, 98304, 131072];
-
-/* Typical dual-channel DDR5 throughput — the ceiling once layers spill
- * out of VRAM and onto the CPU. */
-const SYSTEM_RAM_BANDWIDTH = 60;
-const BASELINE_OVERHEAD_GB = 1.5;
 
 /* ------------------------------------------------------------------ *
  * Formatting helpers
@@ -481,82 +480,20 @@ export default function App() {
   const bandwidthGBPerSecond = hardwareId === 'custom' ? customBandwidth : hardwarePreset.bandwidth;
 
   /* ---------------- core calculation ---------------- */
-  const calc = useMemo(() => {
-    // Model weights: params x bytes-per-weight, plus a 1.2x allocator /
-    // fragmentation factor for the loaded tensors.
-    const weightsRaw = (arch.params * 1e9 * (quant.bpw / 8)) / GIB;
-    const weights = weightsRaw * 1.2;
-
-    // KV cache: 2 tensors (K and V) x layers x kv-heads x head-dim per token.
-    // Grouped-query attention means kv-heads, not attention heads.
-    const kvBytesPerToken = 2 * arch.layers * arch.kvHeads * arch.headDim * kvPrecision.bytes;
-    const kvPerTokenGB = kvBytesPerToken / GIB;
-    const kv = kvPerTokenGB * context * batchSize;
-
-    // Without flash attention the backend materialises attention scores,
-    // costing roughly a quarter of the cache again in scratch buffers.
-    const attentionScratch = flashAttention ? 0 : kv * 0.25;
-    const overhead = BASELINE_OVERHEAD_GB + attentionScratch;
-
-    const total = weights + kv + overhead;
-    const remaining = capacityGB - total;
-    const utilisation = (total / capacityGB) * 100;
-    const fits = total <= capacityGB;
-
-    // Hardware vendors report decimal GB/s, while weight footprints use GiB.
-    // Decode is memory-bandwidth bound: each token streams the weights once.
-    const bandwidthGiBPerSecond = bandwidthGBPerSecond * 1e9 / (1024 ** 3);
-    const idealTps = bandwidthGiBPerSecond / weights;
-
-    // CPU offload can only help when the device-resident KV cache and runtime
-    // memory fit before any model weights are loaded.
-    const nonWeightMemory = kv + overhead;
-    const cpuOffloadPossible = nonWeightMemory <= capacityGB;
-
-    // Overflow spills layers to system RAM, so the effective read
-    // bandwidth becomes a weighted harmonic mean of VRAM and DDR.
-    const overflow = Math.max(0, total - capacityGB);
-    const offloadFraction = weights > 0 ? Math.min(1, overflow / weights) : 0;
-    let tps = null;
-    if (cpuOffloadPossible) {
-      const effectiveBandwidthGBPerSecond =
-        offloadFraction > 0
-          ? 1 / ((1 - offloadFraction) / bandwidthGBPerSecond + offloadFraction / SYSTEM_RAM_BANDWIDTH)
-          : bandwidthGBPerSecond;
-      const effectiveBandwidthGiBPerSecond = effectiveBandwidthGBPerSecond * 1e9 / (1024 ** 3);
-      tps = effectiveBandwidthGiBPerSecond / weights;
-    }
-
-    // Batched decode amortises the weight read across streams, but
-    // attention and scheduling keep it sub-linear.
-    const aggregateTps = tps === null ? null : tps * Math.pow(batchSize, 0.85);
-
-    // Largest context that still fits, at the current everything-else.
-    const kvSlope = kvPerTokenGB * batchSize * (flashAttention ? 1 : 1.25);
-    const maxContext =
-      kvSlope > 0 ? Math.max(0, (capacityGB - weights - BASELINE_OVERHEAD_GB) / kvSlope) : 0;
-
-    return {
-      weightsRaw,
-      weights,
-      kv,
-      kvPerTokenGB,
-      attentionScratch,
-      overhead,
-      total,
-      remaining,
-      utilisation,
-      fits,
-      bandwidthGiBPerSecond,
-      idealTps,
-      tps,
-      aggregateTps,
-      offloadFraction,
-      nonWeightMemory,
-      cpuOffloadPossible,
-      maxContext,
-    };
-  }, [arch, quant, kvPrecision, context, batchSize, flashAttention, capacityGB, bandwidthGBPerSecond]);
+  const calc = useMemo(
+    () =>
+      calculateProfile({
+        arch,
+        bitsPerWeight: quant.bpw,
+        kvBytesPerElement: kvPrecision.bytes,
+        context,
+        batchSize,
+        flashAttention,
+        capacityGB,
+        bandwidthGBPerSecond,
+      }),
+    [arch, quant, kvPrecision, context, batchSize, flashAttention, capacityGB, bandwidthGBPerSecond]
+  );
 
   /* ---------------- chart data ---------------- */
   const stackData = [
@@ -1464,7 +1401,7 @@ export default function App() {
                   expected benchmark performance.
                 </li>
                 <li>
-                  <span className="text-[#b4b4c2]">Offload</span> assumes {SYSTEM_RAM_BANDWIDTH} GB/s of system
+                  <span className="text-[#b4b4c2]">Offload</span> assumes {SYSTEM_RAM_BANDWIDTH_GB_PER_SECOND} GB/s of system
                   memory bandwidth for the weights that spill out of VRAM. It is viable only when KV cache plus
                   runtime memory fit on the device without model weights.
                 </li>
