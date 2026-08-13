@@ -163,8 +163,11 @@ const KV_PRECISIONS = [
 
 /* ------------------------------------------------------------------ *
  * Hardware presets
- * `vram` is *usable* memory. Apple Silicon reserves memory for the OS,
- * so unified-memory presets list the practical allocation limit.
+ * `vram` is the capacity the estimator compares against. Discrete GPU
+ * presets use advertised VRAM. Apple Silicon unified-memory presets list
+ * the practical allocation limit, not total system memory. The GB10
+ * preset uses published physical unified memory, not a verified
+ * allocatable amount.
  * ------------------------------------------------------------------ */
 const HARDWARE = [
   { id: 'rtx3060', label: 'RTX 3060 12GB', vram: 12, bandwidth: 360, kind: 'gpu', note: 'Entry-level CUDA card.' },
@@ -177,6 +180,7 @@ const HARDWARE = [
   { id: 'a100_40', label: 'A100 40GB', vram: 40, bandwidth: 1555, kind: 'dc', note: 'HBM2e datacenter accelerator.' },
   { id: 'a100_80', label: 'A100 80GB', vram: 80, bandwidth: 2039, kind: 'dc', note: 'HBM2e, 80GB configuration.' },
   { id: 'h100_80', label: 'H100 80GB', vram: 80, bandwidth: 3350, kind: 'dc', note: 'HBM3. Highest bandwidth listed.' },
+  { id: 'gb10', label: 'Acer Veriton GN100 (GB10 128GB unified)', vram: 128, bandwidth: 273, kind: 'unified', note: 'NVIDIA GB10 Grace Blackwell. 128 GB LPDDR5X coherent unified memory shared by CPU and GPU — published physical capacity, not dedicated VRAM and not a verified LLM-allocatable amount. OS, display, driver, and runtime share this pool. 273 GB/s is NVIDIA theoretical peak. Distinct from Apple Silicon. Overflow may still show the generic CPU-offload / 60 GB/s DDR estimate; that is the existing discrete-GPU estimator, not a second memory pool on this machine.' },
   { id: 'm4pro64', label: 'Mac Studio 64GB (M4 Pro)', vram: 48, bandwidth: 273, kind: 'unified', note: '64GB unified · ~48GB allocatable.' },
   { id: 'm4max64', label: 'Mac Studio 64GB (M4 Max)', vram: 48, bandwidth: 546, kind: 'unified', note: '64GB unified · ~48GB allocatable.' },
   { id: 'm3ultra128', label: 'Mac Studio 128GB (M3 Ultra)', vram: 96, bandwidth: 819, kind: 'unified', note: '128GB unified · ~96GB allocatable.' },
@@ -478,6 +482,12 @@ export default function App() {
 
   const capacityGB = hardwareId === 'custom' ? customVram : hardwarePreset.vram;
   const bandwidthGBPerSecond = hardwareId === 'custom' ? customBandwidth : hardwarePreset.bandwidth;
+  const capacityLabel =
+    hardwareId === 'gb10'
+      ? 'Modeled unified memory'
+      : hardwarePreset.kind === 'unified'
+        ? 'Usable unified memory'
+        : 'Usable VRAM';
 
   /* ---------------- core calculation ---------------- */
   const calc = useMemo(
@@ -646,7 +656,10 @@ export default function App() {
           tone: 'info',
           icon: Server,
           title: `Smallest hardware that fits: ${upgrade.label}`,
-          detail: `${fmtGB(upgrade.vram)} usable at ${fmtInt(upgrade.bandwidth)} GB/s would run this configuration with ${fmtGB(upgrade.vram - calc.total)} to spare.`,
+          detail:
+            upgrade.id === 'gb10'
+              ? `${fmtGB(upgrade.vram)} modeled unified memory at ${fmtInt(upgrade.bandwidth)} GB/s is estimated to fit this configuration with ${fmtGB(upgrade.vram - calc.total)} to spare; actual allocatable memory may be lower.`
+              : `${fmtGB(upgrade.vram)} usable at ${fmtInt(upgrade.bandwidth)} GB/s would run this configuration with ${fmtGB(upgrade.vram - calc.total)} to spare.`,
           action: () => setHardwareId(upgrade.id),
           actionLabel: 'Select',
         });
@@ -963,7 +976,7 @@ export default function App() {
                       style={{ borderColor: T.border, background: T.surfaceInput }}
                     >
                       <div className="font-mono text-[10px] uppercase tracking-[0.1em] text-[#8a8a99]">
-                        Usable VRAM
+                        {capacityLabel}
                       </div>
                       <div className="mt-1 font-mono text-sm text-[#f2f2f5] tabular-nums">
                         {fmtGB(capacityGB)}
@@ -1406,8 +1419,9 @@ export default function App() {
                   runtime memory fit on the device without model weights.
                 </li>
                 <li>
-                  <span className="text-[#b4b4c2]">GB</span> means GiB (2<sup>30</sup> bytes). Unified-memory
-                  presets list the practically allocatable share, not total system memory.
+                  Calculated footprints use GiB (2<sup>30</sup> bytes), while hardware preset capacities are compared as
+                  listed; the interface labels both as GB. Apple unified-memory presets list practical allocatable shares,
+                  while GB10 models published physical unified memory.
                 </li>
               </ul>
             </div>
