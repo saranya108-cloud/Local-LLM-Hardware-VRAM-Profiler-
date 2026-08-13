@@ -656,7 +656,10 @@ export default function App() {
           tone: 'info',
           icon: Server,
           title: `Smallest hardware that fits: ${upgrade.label}`,
-          detail: `${fmtGB(upgrade.vram)} usable at ${fmtInt(upgrade.bandwidth)} GB/s would run this configuration with ${fmtGB(upgrade.vram - calc.total)} to spare.`,
+          detail:
+            upgrade.id === 'gb10'
+              ? `${fmtGB(upgrade.vram)} modeled unified memory at ${fmtInt(upgrade.bandwidth)} GB/s is estimated to fit this configuration with ${fmtGB(upgrade.vram - calc.total)} to spare; actual allocatable memory may be lower.`
+              : `${fmtGB(upgrade.vram)} usable at ${fmtInt(upgrade.bandwidth)} GB/s would run this configuration with ${fmtGB(upgrade.vram - calc.total)} to spare.`,
           action: () => setHardwareId(upgrade.id),
           actionLabel: 'Select',
         });

@@ -57,8 +57,9 @@ benchmark performance. CPU offload is viable only when the KV cache plus
 runtime memory fit on the device without any model weights; otherwise reducing
 context, batch size, or KV precision, or selecting a larger device is required.
 
-Memory quantities are calculated in GiB (2³⁰ bytes), even where the interface
-uses the familiar `GB` label. Apple Silicon unified-memory presets list the
+Calculated memory footprints use GiB (2³⁰ bytes), while hardware preset
+capacity values are compared as listed. The interface uses the familiar `GB`
+label for both. Apple Silicon unified-memory presets list the
 practically allocatable share, not total system memory. The Acer Veriton GN100
 / NVIDIA GB10 preset models 128 GB of published physical LPDDR5X unified
 memory, not a verified LLM-allocatable amount; OS, display, driver, and
