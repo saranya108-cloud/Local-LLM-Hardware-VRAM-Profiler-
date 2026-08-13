@@ -11,7 +11,7 @@ A lightweight, single-file interactive web application for AI engineers, develop
   * **Model Weights:** Static memory required to load parameters.
   * **KV Cache:** Context-dependent memory required for attention key-value states.
   * **CUDA / Runtime Overhead:** Baseline framework memory buffers.
-* **Hardware Preset Matching:** Instant pass/fail analysis across popular GPUs and unified memory setups (NVIDIA RTX series, A100/H100, and Apple Silicon M-series).
+* **Hardware Preset Matching:** Instant pass/fail analysis across popular GPUs and unified memory setups (NVIDIA RTX series, A100/H100, Acer Veriton GN100 / NVIDIA GB10, and Apple Silicon M-series).
 * **Theoretical Decode Ceiling:** A bandwidth-derived upper bound on tokens per second, not expected benchmark performance.
 * **Actionable Recommendations:** Automated suggestions when VRAM overflows (e.g., flash attention context offloading, lower quantization, layer offloading ratios).
 
@@ -58,6 +58,11 @@ runtime memory fit on the device without any model weights; otherwise reducing
 context, batch size, or KV precision, or selecting a larger device is required.
 
 Memory quantities are calculated in GiB (2³⁰ bytes), even where the interface
-uses the familiar `GB` label. Unified-memory presets list the practically
-allocatable share, not total system memory. Every assumption is restated in the
-app's own **Model assumptions** panel.
+uses the familiar `GB` label. Apple Silicon unified-memory presets list the
+practically allocatable share, not total system memory. The Acer Veriton GN100
+/ NVIDIA GB10 preset models 128 GB of published physical LPDDR5X unified
+memory, not a verified LLM-allocatable amount; OS, display, driver, and
+runtime share that pool. GB10 overflow may still show the generic CPU-offload
+/ 60 GB/s DDR estimate — that is the existing discrete-GPU estimator, not a
+second memory pool on this machine. Every assumption is restated in the app's
+own **Model assumptions** panel and in the GB10 preset note.
