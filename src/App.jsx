@@ -1419,8 +1419,9 @@ export default function App() {
                   runtime memory fit on the device without model weights.
                 </li>
                 <li>
-                  <span className="text-[#b4b4c2]">GB</span> means GiB (2<sup>30</sup> bytes). Unified-memory
-                  presets list the practically allocatable share, not total system memory.
+                  Calculated footprints use GiB (2<sup>30</sup> bytes), while hardware preset capacities are compared as
+                  listed; the interface labels both as GB. Apple unified-memory presets list practical allocatable shares,
+                  while GB10 models published physical unified memory.
                 </li>
               </ul>
             </div>
