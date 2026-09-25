@@ -34,13 +34,11 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import {
-  BASELINE_OVERHEAD_GB,
-  GIB,
-  SYSTEM_RAM_BANDWIDTH_GB_PER_SECOND,
-  calculateProfile,
-} from './calculations.js';
+import { profileInputsFromAssumptions, resolveAssumptions } from './assumptions.js';
+import { GIB, calculateProfile } from './calculations.js';
+import { BACKENDS, DEFAULT_BACKEND_ID, preferredQuantId, quantsForBackend } from './data/backends.js';
 import { DEFAULT_HARDWARE_ID, HARDWARE } from './data/hardware.js';
+import { DEFAULT_MEMORY_ID, selectableMemoryProfiles } from './data/memory.js';
 import { CONTEXT_STEPS, MODELS } from './data/models.js';
 import { KV_PRECISIONS, QUANTS } from './data/quantization.js';
 
@@ -183,13 +181,20 @@ function Segmented({ options, value, onChange, columns = 3, ariaLabel }) {
             type="button"
             role="radio"
             aria-checked={active}
-            onClick={() => onChange(o.value)}
-            className={`rounded-lg border px-2 py-2 font-mono text-xs transition focus:outline-none focus-visible:ring-1 focus-visible:ring-[#3987e5] ${
+            aria-disabled={o.disabled || undefined}
+            disabled={o.disabled}
+            onClick={() => {
+              if (!o.disabled) onChange(o.value);
+            }}
+            className={`rounded-lg border px-2 py-2 font-mono text-xs transition focus:outline-none focus-visible:ring-1 focus-visible:ring-[#3987e5] disabled:cursor-not-allowed ${
               active
                 ? 'border-[#3987e5] bg-[#3987e5]/15 text-[#f2f2f5]'
-                : 'bg-[#101017] text-[#b4b4c2] hover:border-[rgba(255,255,255,0.2)] hover:text-[#f2f2f5]'
+                : 'bg-[#101017] text-[#b4b4c2] hover:border-[rgba(255,255,255,0.2)] hover:text-[#f2f2f5] disabled:hover:border-[rgba(255,255,255,0.08)] disabled:hover:text-[#8a8a99]'
             }`}
-            style={active ? undefined : { borderColor: T.border }}
+            style={{
+              ...(active ? {} : { borderColor: T.border }),
+              opacity: o.disabled ? 0.45 : 1,
+            }}
           >
             {o.label}
           </button>
@@ -335,6 +340,9 @@ export default function App() {
   const [hardwareId, setHardwareId] = useState(DEFAULT_HARDWARE_ID);
   const [customVram, setCustomVram] = useState(24);
   const [customBandwidth, setCustomBandwidth] = useState(900);
+  const [memoryId, setMemoryId] = useState(DEFAULT_MEMORY_ID);
+  const [customSystemBandwidth, setCustomSystemBandwidth] = useState(60);
+  const [backendId, setBackendId] = useState(DEFAULT_BACKEND_ID);
   const [flashAttention, setFlashAttention] = useState(true);
 
   /* ---------------- resolved configuration ---------------- */
@@ -342,7 +350,19 @@ export default function App() {
   const quant = QUANTS.find((q) => q.id === quantId);
   const kvPrecision = KV_PRECISIONS.find((k) => k.id === kvPrecisionId);
   const hardwarePreset = HARDWARE.find((h) => h.id === hardwareId);
+  const backend = BACKENDS.find((item) => item.id === backendId);
+  const memoryChoices = selectableMemoryProfiles();
+  const memoryProfile = memoryChoices.find((item) => item.id === memoryId);
+  const supportedQuants = useMemo(() => quantsForBackend(backend), [backend]);
+  const unavailableQuants = QUANTS.filter((item) => !supportedQuants.some((q) => q.id === item.id));
   const context = CONTEXT_STEPS[ctxIndex];
+
+  function onBackendChange(id) {
+    const next = BACKENDS.find((item) => item.id === id);
+    setBackendId(id);
+    const nextQuantId = preferredQuantId(next, quantId);
+    if (nextQuantId && nextQuantId !== quantId) setQuantId(nextQuantId);
+  }
 
   const arch = useMemo(() => {
     if (modelId === 'custom') {
@@ -369,7 +389,17 @@ export default function App() {
         ? 'Usable unified memory'
         : 'Usable VRAM';
 
-  /* ---------------- core calculation ---------------- */
+  /* ---------------- resolved assumptions, then the numeric engine ---------------- */
+  const assumptions = useMemo(
+    () =>
+      resolveAssumptions({
+        memoryId,
+        systemBandwidthGBPerSecond: customSystemBandwidth,
+        backendId,
+      }),
+    [memoryId, customSystemBandwidth, backendId],
+  );
+
   const calc = useMemo(
     () =>
       calculateProfile({
@@ -381,8 +411,9 @@ export default function App() {
         flashAttention,
         capacityGB,
         bandwidthGBPerSecond,
+        ...profileInputsFromAssumptions(assumptions),
       }),
-    [arch, quant, kvPrecision, context, batchSize, flashAttention, capacityGB, bandwidthGBPerSecond]
+    [arch, quant, kvPrecision, context, batchSize, flashAttention, capacityGB, bandwidthGBPerSecond, assumptions],
   );
 
   /* ---------------- chart data ---------------- */
@@ -397,13 +428,13 @@ export default function App() {
   const axisMax = Math.max(calc.total, capacityGB) * 1.12;
 
   const contextCurve = useMemo(() => {
-    const slope = calc.kvPerTokenGB * batchSize * (flashAttention ? 1 : 1.25);
+    const slope = calc.kvPerTokenGB * batchSize * (flashAttention ? 1 : 1 + calc.attentionScratchFactor);
     return CONTEXT_STEPS.map((c) => ({
       context: c,
       label: fmtCtx(c),
-      total: Number((calc.weights + BASELINE_OVERHEAD_GB + slope * c).toFixed(3)),
+      total: Number((calc.weights + calc.baselineOverheadGB + slope * c).toFixed(3)),
     }));
-  }, [calc.kvPerTokenGB, calc.weights, batchSize, flashAttention]);
+  }, [calc.kvPerTokenGB, calc.weights, calc.baselineOverheadGB, calc.attentionScratchFactor, batchSize, flashAttention]);
 
   // Keep the capacity reference line inside the plot even when the curve
   // never reaches it, so the pass/fail margin stays visible.
@@ -421,7 +452,7 @@ export default function App() {
       // Prefer the highest-quality format that closes the gap on its own;
       // if none does, still surface the biggest saving available and say
       // plainly how much is left over.
-      const cheaper = QUANTS.filter((q) => q.bpw < quant.bpw).sort((a, b) => b.bpw - a.bpw);
+      const cheaper = supportedQuants.filter((q) => q.bpw < quant.bpw).sort((a, b) => b.bpw - a.bpw);
       const closing = cheaper.find((q) => calc.weights - weightsFor(q) >= deficit);
       const pick = closing || cheaper[cheaper.length - 1];
       if (pick) {
@@ -491,16 +522,16 @@ export default function App() {
 
       // When no single change is enough, show the most aggressive
       // configuration that would actually fit on this hardware.
-      if (!closing) {
-        const smallest = QUANTS.reduce((a, b) => (b.bpw < a.bpw ? b : a));
+      if (!closing && supportedQuants.length > 0) {
+        const smallest = supportedQuants.reduce((a, b) => (b.bpw < a.bpw ? b : a));
         const minWeights = weightsFor(smallest);
         const minKvPerToken = (2 * arch.layers * arch.kvHeads * arch.headDim * 0.5) / GIB;
         const bestCtx = [...CONTEXT_STEPS]
           .reverse()
-          .find((c) => minWeights + minKvPerToken * c + BASELINE_OVERHEAD_GB <= capacityGB);
+          .find((c) => minWeights + minKvPerToken * c + calc.baselineOverheadGB <= capacityGB);
 
         if (bestCtx) {
-          const planTotal = minWeights + minKvPerToken * bestCtx + BASELINE_OVERHEAD_GB;
+          const planTotal = minWeights + minKvPerToken * bestCtx + calc.baselineOverheadGB;
           out.push({
             tone: 'critical',
             icon: SlidersHorizontal,
@@ -515,7 +546,7 @@ export default function App() {
             actionLabel: 'Apply plan',
           });
         } else {
-          const cards = Math.ceil((minWeights + minKvPerToken * 2048 + BASELINE_OVERHEAD_GB) / capacityGB);
+          const cards = Math.ceil((minWeights + minKvPerToken * 2048 + calc.baselineOverheadGB) / capacityGB);
           out.push({
             tone: 'critical',
             icon: Server,
@@ -552,12 +583,19 @@ export default function App() {
         });
       }
 
-      if (calc.cpuOffloadPossible) {
+      if (assumptions.cpuOffloadMode === 'disabled') {
+        out.push({
+          tone: 'info',
+          icon: HardDrive,
+          title: `${assumptions.backend.label} withholds CPU weight offload`,
+          detail: `The spill ceiling is hidden for this backend. Overhead stays ${fmtGB(calc.baselineOverheadGB)} plus attention scratch, and device bandwidth stays ${fmtInt(bandwidthGBPerSecond)} GB/s.`,
+        });
+      } else if (calc.cpuOffloadPossible) {
         out.push({
           tone: 'info',
           icon: HardDrive,
           title: `Offload at least ~${Math.ceil(calc.offloadFraction * 100)}% of weights to CPU`,
-          detail: `This can make the memory footprint fit. The resulting theoretical decode ceiling is ≤${fmtTps(calc.tps)} tok/s, versus a fully resident ceiling of ≤${fmtTps(calc.idealTps)} tok/s. These are bandwidth-derived upper bounds, not expected benchmark performance.`,
+          detail: `Spilled weights use ${assumptions.memory.label} at ${fmtInt(assumptions.systemRamBandwidthGBPerSecond)} GB/s. The resulting theoretical decode ceiling is ≤${fmtTps(calc.tps)} tok/s, versus a fully resident ceiling of ≤${fmtTps(calc.idealTps)} tok/s. These are bandwidth-derived upper bounds, not expected benchmark performance.`,
         });
       } else {
         out.push({
@@ -582,7 +620,7 @@ export default function App() {
         });
       }
 
-      const better = QUANTS.filter((q) => q.bpw > quant.bpw).sort((a, b) => a.bpw - b.bpw);
+      const better = supportedQuants.filter((q) => q.bpw > quant.bpw).sort((a, b) => a.bpw - b.bpw);
       for (const q of better) {
         const newWeights = ((arch.params * 1e9 * (q.bpw / 8)) / GIB) * 1.2;
         if (newWeights + calc.kv + calc.overhead <= capacityGB) {
@@ -643,6 +681,8 @@ export default function App() {
     flashAttention,
     capacityGB,
     bandwidthGBPerSecond,
+    supportedQuants,
+    assumptions,
   ]);
 
   /* ---------------- feasibility table ---------------- */
@@ -663,8 +703,8 @@ export default function App() {
       component: 'Runtime overhead',
       color: T.overhead,
       detail: flashAttention
-        ? `${fmtGB(BASELINE_OVERHEAD_GB)} CUDA/runtime baseline`
-        : `${fmtGB(BASELINE_OVERHEAD_GB)} baseline + ${fmtGB(calc.attentionScratch)} attention scratch`,
+        ? `${fmtGB(calc.baselineOverheadGB)} unallocated baseline · OS, driver, framework, and peaks not modeled`
+        : `${fmtGB(calc.baselineOverheadGB)} unallocated baseline + ${fmtGB(calc.attentionScratch)} attention scratch · OS, driver, framework, and peaks not modeled`,
       size: calc.overhead,
     },
   ];
@@ -755,9 +795,20 @@ export default function App() {
                     columns={3}
                     value={quantId}
                     onChange={setQuantId}
-                    options={QUANTS.map((q) => ({ value: q.id, label: q.label }))}
+                    options={QUANTS.map((q) => ({
+                      value: q.id,
+                      label: q.label,
+                      disabled: !supportedQuants.some((item) => item.id === q.id),
+                    }))}
                   />
                   <p className="pt-1 text-[11px] leading-snug text-[#8a8a99]">{quant.note}</p>
+                  {unavailableQuants.length > 0 && (
+                    <p className="text-[11px] leading-snug text-[#8a8a99]">
+                      {supportedQuants.length === 0
+                        ? `${backend.label} has no tagged quantization formats yet. This estimate keeps the generic formulas for ${quant.label}.`
+                        : `${backend.label} leaves ${unavailableQuants.map((item) => item.label).join(', ')} unavailable. Those formats stay in the catalog.`}
+                    </p>
+                  )}
                 </Field>
 
                 <div
@@ -777,6 +828,16 @@ export default function App() {
 
             <Panel title="Inference" icon={SlidersHorizontal}>
               <div className="space-y-4">
+                <Field label="Backend" htmlFor="backend">
+                  <Select
+                    id="backend"
+                    value={backendId}
+                    onChange={onBackendChange}
+                    options={BACKENDS.map((item) => ({ value: item.id, label: item.label }))}
+                  />
+                  <p className="pt-1 text-[11px] leading-snug text-[#8a8a99]">{backend.note}</p>
+                </Field>
+
                 <Field label="Context window" hint={`${fmtCtx(context)} · ${fmtInt(context)} tokens`} htmlFor="ctx">
                   <Slider
                     id="ctx"
@@ -831,6 +892,12 @@ export default function App() {
                     options={HARDWARE.map((h) => ({ value: h.id, label: h.label }))}
                   />
                   <p className="pt-1 text-[11px] leading-snug text-[#8a8a99]">{hardwarePreset.note}</p>
+                  {hardwareId === 'gb10' && memoryId !== DEFAULT_MEMORY_ID && (
+                    <p className="text-[11px] leading-snug text-[#8a8a99]">
+                      This estimate uses {memoryProfile.label} at {fmtInt(assumptions.systemRamBandwidthGBPerSecond)} GB/s
+                      for spilled weights.
+                    </p>
+                  )}
                 </Field>
 
                 {hardwareId === 'custom' ? (
@@ -838,7 +905,7 @@ export default function App() {
                     <Field label="Usable VRAM" hint={fmtGB(customVram)} htmlFor="cvram">
                       <Slider id="cvram" min={4} max={256} step={2} value={customVram} onChange={setCustomVram} />
                     </Field>
-                    <Field label="Memory bandwidth" hint={`${fmtInt(customBandwidth)} GB/s`} htmlFor="cbw">
+                    <Field label="Device bandwidth" hint={`${fmtInt(customBandwidth)} GB/s`} htmlFor="cbw">
                       <Slider
                         id="cbw"
                         min={50}
@@ -867,13 +934,63 @@ export default function App() {
                       style={{ borderColor: T.border, background: T.surfaceInput }}
                     >
                       <div className="font-mono text-[10px] uppercase tracking-[0.1em] text-[#8a8a99]">
-                        Bandwidth
+                        Device bandwidth
                       </div>
                       <div className="mt-1 font-mono text-sm text-[#f2f2f5] tabular-nums">
                         {fmtInt(bandwidthGBPerSecond)} GB/s
                       </div>
                     </div>
                   </div>
+                )}
+
+                <Field
+                  label="System memory"
+                  hint={
+                    memoryId === 'custom'
+                      ? `${fmtInt(customSystemBandwidth)} GB/s`
+                      : `${memoryProfile.bandwidthGBPerSecond} GB/s`
+                  }
+                  htmlFor="system-memory"
+                >
+                  <Select
+                    id="system-memory"
+                    value={memoryId}
+                    onChange={setMemoryId}
+                    options={memoryChoices.map((profile) => ({
+                      value: profile.id,
+                      label:
+                        profile.bandwidthGBPerSecond == null
+                          ? profile.label
+                          : `${profile.label} · ${profile.bandwidthGBPerSecond} GB/s`,
+                    }))}
+                  />
+                  <p className="pt-1 text-[11px] leading-snug text-[#8a8a99]">{memoryProfile.note}</p>
+                </Field>
+
+                {memoryId === 'custom' && (
+                  <Field label="Spill bandwidth" hint={`${fmtInt(customSystemBandwidth)} GB/s`} htmlFor="system-bw">
+                    <div className="flex items-center gap-3">
+                      <Slider
+                        id="system-bw"
+                        min={1}
+                        max={2000}
+                        step={1}
+                        value={customSystemBandwidth}
+                        onChange={setCustomSystemBandwidth}
+                      />
+                      <div className="w-28 shrink-0">
+                        <NumberInput
+                          id="system-bw-value"
+                          value={customSystemBandwidth}
+                          onChange={setCustomSystemBandwidth}
+                          min={1}
+                          max={2000}
+                          step={1}
+                          suffix="GB/s"
+                        />
+                      </div>
+                    </div>
+                  </Field>
                 )}
               </div>
             </Panel>
@@ -901,9 +1018,11 @@ export default function App() {
                 sub={
                   calc.remaining >= 0
                     ? `Headroom for prompt bursts and a second process`
-                    : calc.cpuOffloadPossible
-                      ? `Over budget — at least ~${Math.ceil(calc.offloadFraction * 100)}% of weights must be offloaded`
-                      : `KV cache + runtime use ${fmtGB(calc.nonWeightMemory)} — CPU offload cannot make it fit`
+                    : assumptions.cpuOffloadMode === 'disabled'
+                      ? `${assumptions.backend.label} withholds the CPU-offload ceiling`
+                      : calc.cpuOffloadPossible
+                        ? `Over budget — at least ~${Math.ceil(calc.offloadFraction * 100)}% of weights must be offloaded`
+                        : `KV cache + runtime use ${fmtGB(calc.nonWeightMemory)} — CPU offload cannot make it fit`
                 }
               />
               <MetricCard
@@ -917,9 +1036,11 @@ export default function App() {
                     ? batchSize > 1
                       ? `Bandwidth-derived upper bound; aggregate ceiling ≤${fmtTps(calc.aggregateTps)} tok/s across ${batchSize} streams. Not expected benchmark performance.`
                       : `${fmtInt(bandwidthGBPerSecond)} decimal GB/s converts to ${calc.bandwidthGiBPerSecond.toFixed(1)} GiB/s. Upper bound only, not expected benchmark performance.`
-                    : calc.cpuOffloadPossible
-                      ? `CPU-offload bandwidth-derived upper bound; fully resident ceiling ≤${fmtTps(calc.idealTps)} tok/s. Not expected benchmark performance.`
-                      : `KV cache plus runtime memory exceed device capacity before weights are loaded.`
+                    : assumptions.cpuOffloadMode === 'disabled'
+                      ? `${assumptions.backend.label} withholds the spill ceiling. Device bandwidth stays ${fmtInt(bandwidthGBPerSecond)} GB/s.`
+                      : calc.cpuOffloadPossible
+                        ? `CPU-offload bandwidth-derived upper bound at ${fmtInt(assumptions.systemRamBandwidthGBPerSecond)} GB/s system memory; fully resident ceiling ≤${fmtTps(calc.idealTps)} tok/s. Not expected benchmark performance.`
+                        : `KV cache plus runtime memory exceed device capacity before weights are loaded.`
                 }
               />
             </div>
@@ -1245,9 +1366,11 @@ export default function App() {
                       <td className="py-2.5 pr-4 text-[11px] text-[#8a8a99]">
                         {calc.fits
                           ? `Fully resident on device · theoretical decode ceiling ≤${fmtTps(calc.tps)} tok/s`
-                          : calc.cpuOffloadPossible
-                            ? `Short by ${fmtGB(Math.abs(calc.remaining))} · offload at least ~${Math.ceil(calc.offloadFraction * 100)}% of weights · theoretical ceiling ≤${fmtTps(calc.tps)} tok/s`
-                            : `KV cache + runtime require ${fmtGB(calc.nonWeightMemory)} · CPU offload cannot make this configuration fit`}
+                          : assumptions.cpuOffloadMode === 'disabled'
+                            ? `Short by ${fmtGB(Math.abs(calc.remaining))} · ${assumptions.backend.label} withholds the CPU-offload ceiling`
+                            : calc.cpuOffloadPossible
+                              ? `Short by ${fmtGB(Math.abs(calc.remaining))} · offload at least ~${Math.ceil(calc.offloadFraction * 100)}% of weights at ${fmtInt(assumptions.systemRamBandwidthGBPerSecond)} GB/s · theoretical ceiling ≤${fmtTps(calc.tps)} tok/s`
+                              : `KV cache + runtime require ${fmtGB(calc.nonWeightMemory)} · CPU offload cannot make this configuration fit`}
                       </td>
                       <td colSpan={2} className="py-2.5 text-right">
                         <span
@@ -1285,8 +1408,19 @@ export default function App() {
                   batch × bytes-per-element. Grouped-query attention is assumed (8 KV heads).
                 </li>
                 <li>
-                  <span className="text-[#b4b4c2]">Overhead</span> = 1.5 GB CUDA/runtime baseline, plus 25% of the
-                  cache as attention scratch when Flash Attention is off.
+                  <span className="text-[#b4b4c2]">Overhead</span> ={' '}
+                  {assumptions.marginBuckets
+                    .map((bucket) =>
+                      bucket.modeled
+                        ? `${fmtGB(bucket.gb)} ${bucket.label.toLowerCase()}`
+                        : `${bucket.label.toLowerCase()} ${fmtGB(bucket.gb)} (not modeled yet)`,
+                    )
+                    .join('; ')}
+                  . Attention scratch is{' '}
+                  {flashAttention
+                    ? '0 while Flash Attention is on'
+                    : `${fmtGB(calc.attentionScratch)} (${Math.round(calc.attentionScratchFactor * 100)}% of the KV cache) while Flash Attention is off`}
+                  . The 1.2× weight factor stays on the weight term. The runtime overhead line totals {fmtGB(calc.overhead)}.
                 </li>
                 <li>
                   <span className="text-[#b4b4c2]">Theoretical decode ceiling</span> = bandwidth in GiB/s ÷ weight
@@ -1294,9 +1428,15 @@ export default function App() {
                   expected benchmark performance.
                 </li>
                 <li>
-                  <span className="text-[#b4b4c2]">Offload</span> assumes {SYSTEM_RAM_BANDWIDTH_GB_PER_SECOND} GB/s of system
-                  memory bandwidth for the weights that spill out of VRAM. It is viable only when KV cache plus
-                  runtime memory fit on the device without model weights.
+                  <span className="text-[#b4b4c2]">Offload</span> reads spilled weights at {assumptions.memory.label}{' '}
+                  ({fmtInt(assumptions.systemRamBandwidthGBPerSecond)} GB/s, {assumptions.memory.mode}). Every preset,
+                  including Apple Silicon and GB10, uses this system-memory profile until another one is selected.
+                  {assumptions.cpuOffloadMode === 'disabled'
+                    ? ` ${assumptions.backend.label} withholds that spill ceiling.`
+                    : ' CPU offload is available when the KV cache plus runtime memory fit on the device without model weights.'}
+                </li>
+                <li>
+                  <span className="text-[#b4b4c2]">Backend</span> = {assumptions.backend.label}. {assumptions.backend.note}
                 </li>
                 <li>
                   Calculated footprints use GiB (2<sup>30</sup> bytes), while hardware preset capacities are compared as
