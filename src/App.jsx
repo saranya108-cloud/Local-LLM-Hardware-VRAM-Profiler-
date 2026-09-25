@@ -40,6 +40,9 @@ import {
   SYSTEM_RAM_BANDWIDTH_GB_PER_SECOND,
   calculateProfile,
 } from './calculations.js';
+import { DEFAULT_HARDWARE_ID, HARDWARE } from './data/hardware.js';
+import { CONTEXT_STEPS, MODELS } from './data/models.js';
+import { KV_PRECISIONS, QUANTS } from './data/quantization.js';
 
 /* ------------------------------------------------------------------ *
  * Design tokens — dark terminal theme.
@@ -65,129 +68,6 @@ const T = {
   warning: '#fab219',
   critical: '#d03b3b',
 };
-
-/* ------------------------------------------------------------------ *
- * Model architectures
- * Layer / head geometry drives the KV cache, so it is tracked per
- * model rather than guessed from the parameter count alone.
- * ------------------------------------------------------------------ */
-const MODELS = [
-  {
-    id: '3b',
-    label: '3B',
-    example: 'Llama 3.2 3B',
-    params: 3.2,
-    layers: 28,
-    hidden: 3072,
-    heads: 24,
-    kvHeads: 8,
-    headDim: 128,
-  },
-  {
-    id: '7b',
-    label: '7B / 8B',
-    example: 'Mistral 7B · Llama 3.1 8B',
-    params: 8.0,
-    layers: 32,
-    hidden: 4096,
-    heads: 32,
-    kvHeads: 8,
-    headDim: 128,
-  },
-  {
-    id: '14b',
-    label: '14B',
-    example: 'Qwen 2.5 14B',
-    params: 14.8,
-    layers: 48,
-    hidden: 5120,
-    heads: 40,
-    kvHeads: 8,
-    headDim: 128,
-  },
-  {
-    id: '32b',
-    label: '32B',
-    example: 'Qwen 2.5 32B · QwQ',
-    params: 32.8,
-    layers: 64,
-    hidden: 5120,
-    heads: 40,
-    kvHeads: 8,
-    headDim: 128,
-  },
-  {
-    id: '70b',
-    label: '70B',
-    example: 'Llama 3.3 70B · DeepSeek R1 Distill',
-    params: 70.6,
-    layers: 80,
-    hidden: 8192,
-    heads: 64,
-    kvHeads: 8,
-    headDim: 128,
-  },
-  {
-    id: 'custom',
-    label: 'Custom',
-    example: 'Set your own parameter count',
-    params: 24,
-    layers: null,
-    hidden: null,
-    heads: null,
-    kvHeads: 8,
-    headDim: 128,
-  },
-];
-
-/* ------------------------------------------------------------------ *
- * Quantization formats — effective bits per weight including the
- * per-block scale/zero-point metadata that GGUF k-quants carry.
- * ------------------------------------------------------------------ */
-const QUANTS = [
-  { id: 'fp16', label: 'FP16', bpw: 16, quality: 100, note: 'Reference precision. No quality loss, maximum memory.' },
-  { id: 'q8_0', label: 'Q8_0', bpw: 8.5, quality: 99, note: 'Effectively lossless. Good when VRAM is not the constraint.' },
-  { id: 'q6_k', label: 'Q6_K', bpw: 6.56, quality: 98, note: 'Near-lossless. The best quality/size point above 4-bit.' },
-  { id: 'q4_k_m', label: 'Q4_K_M', bpw: 4.85, quality: 95, note: 'The community default. Small, measurable perplexity cost.' },
-  { id: 'q3_k_s', label: 'Q3_K_S', bpw: 3.44, quality: 87, note: 'Aggressive. Noticeable degradation — a last resort to fit.' },
-  { id: 'exl2', label: 'EXL2', bpw: 4.25, quality: 93, note: 'ExLlamaV2 @ 4.25 bpw. GPU-only, fastest single-stream decode.' },
-];
-
-/* KV cache element precision. Quantized KV is the cheapest way to buy
- * back context length once the weights are already as small as useful. */
-const KV_PRECISIONS = [
-  { id: 'fp16', label: 'FP16', bytes: 2, note: 'Default KV precision.' },
-  { id: 'q8', label: 'Q8', bytes: 1, note: 'Halves cache size, negligible quality impact.' },
-  { id: 'q4', label: 'Q4', bytes: 0.5, note: 'Quarter size. Can degrade long-context recall.' },
-];
-
-/* ------------------------------------------------------------------ *
- * Hardware presets
- * `vram` is the capacity the estimator compares against. Discrete GPU
- * presets use advertised VRAM. Apple Silicon unified-memory presets list
- * the practical allocation limit, not total system memory. The GB10
- * preset uses published physical unified memory, not a verified
- * allocatable amount.
- * ------------------------------------------------------------------ */
-const HARDWARE = [
-  { id: 'rtx3060', label: 'RTX 3060 12GB', vram: 12, bandwidth: 360, kind: 'gpu', note: 'Entry-level CUDA card.' },
-  { id: 'rtx4060ti', label: 'RTX 4060 Ti 16GB', vram: 16, bandwidth: 288, kind: 'gpu', note: 'Roomy VRAM, narrow memory bus.' },
-  { id: 'rtx3090', label: 'RTX 3090 24GB', vram: 24, bandwidth: 936, kind: 'gpu', note: 'The used-market local-LLM workhorse.' },
-  { id: 'rtx4090', label: 'RTX 4090 24GB', vram: 24, bandwidth: 1008, kind: 'gpu', note: 'Fastest consumer 24GB card.' },
-  { id: 'rtx5090', label: 'RTX 5090 32GB', vram: 32, bandwidth: 1792, kind: 'gpu', note: 'GDDR7. Huge bandwidth uplift.' },
-  { id: 'dual3090', label: 'Dual RTX 3090 48GB', vram: 48, bandwidth: 936, kind: 'multi', note: 'Tensor-split across 2 cards.' },
-  { id: 'dual4090', label: 'Dual RTX 4090 48GB', vram: 48, bandwidth: 1008, kind: 'multi', note: 'Tensor-split across 2 cards.' },
-  { id: 'a100_40', label: 'A100 40GB', vram: 40, bandwidth: 1555, kind: 'dc', note: 'HBM2e datacenter accelerator.' },
-  { id: 'a100_80', label: 'A100 80GB', vram: 80, bandwidth: 2039, kind: 'dc', note: 'HBM2e, 80GB configuration.' },
-  { id: 'h100_80', label: 'H100 80GB', vram: 80, bandwidth: 3350, kind: 'dc', note: 'HBM3. Highest bandwidth listed.' },
-  { id: 'gb10', label: 'Acer Veriton GN100 (GB10 128GB unified)', vram: 128, bandwidth: 273, kind: 'unified', note: 'NVIDIA GB10 Grace Blackwell. 128 GB LPDDR5X coherent unified memory shared by CPU and GPU — published physical capacity, not dedicated VRAM and not a verified LLM-allocatable amount. OS, display, driver, and runtime share this pool. 273 GB/s is NVIDIA theoretical peak. Distinct from Apple Silicon. Overflow may still show the generic CPU-offload / 60 GB/s DDR estimate; that is the existing discrete-GPU estimator, not a second memory pool on this machine.' },
-  { id: 'm4pro64', label: 'Mac Studio 64GB (M4 Pro)', vram: 48, bandwidth: 273, kind: 'unified', note: '64GB unified · ~48GB allocatable.' },
-  { id: 'm4max64', label: 'Mac Studio 64GB (M4 Max)', vram: 48, bandwidth: 546, kind: 'unified', note: '64GB unified · ~48GB allocatable.' },
-  { id: 'm3ultra128', label: 'Mac Studio 128GB (M3 Ultra)', vram: 96, bandwidth: 819, kind: 'unified', note: '128GB unified · ~96GB allocatable.' },
-  { id: 'custom', label: 'Custom hardware', vram: 24, bandwidth: 900, kind: 'gpu', note: 'Dial in your own VRAM and bandwidth.' },
-];
-
-const CONTEXT_STEPS = [2048, 4096, 8192, 16384, 32768, 65536, 98304, 131072];
 
 /* ------------------------------------------------------------------ *
  * Formatting helpers
@@ -452,7 +332,7 @@ export default function App() {
   const [kvPrecisionId, setKvPrecisionId] = useState('fp16');
   const [ctxIndex, setCtxIndex] = useState(3); // 16k
   const [batchSize, setBatchSize] = useState(1);
-  const [hardwareId, setHardwareId] = useState('rtx4090');
+  const [hardwareId, setHardwareId] = useState(DEFAULT_HARDWARE_ID);
   const [customVram, setCustomVram] = useState(24);
   const [customBandwidth, setCustomBandwidth] = useState(900);
   const [flashAttention, setFlashAttention] = useState(true);
