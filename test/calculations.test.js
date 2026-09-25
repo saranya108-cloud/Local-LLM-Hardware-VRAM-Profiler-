@@ -120,3 +120,61 @@ test('maximum context remains non-negative', () => {
 
   assert.equal(result.maxContext, 0);
 });
+
+test('explicit default arguments match omitted arguments', () => {
+  assert.deepEqual(
+    profile({
+      systemRamBandwidthGBPerSecond: 60,
+      baselineOverheadGB: 1.5,
+      attentionScratchFactor: 0.25,
+      cpuOffloadMode: 'weights-if-kv-fits',
+    }),
+    profile(),
+  );
+});
+
+test('a custom system bandwidth changes only the offload ceiling', () => {
+  const resident = profile({ systemRamBandwidthGBPerSecond: 180 });
+  const residentDefault = profile();
+
+  approx(resident.tps, residentDefault.tps);
+  approx(resident.total, residentDefault.total);
+  approx(resident.weights, residentDefault.weights);
+
+  const capacityGB = expectedKv + 1.5 + expectedWeights * 0.5;
+  const spilled = profile({ capacityGB, systemRamBandwidthGBPerSecond: 180 });
+  const spilledDefault = profile({ capacityGB, systemRamBandwidthGBPerSecond: 60 });
+
+  approx(spilled.total, spilledDefault.total);
+  approx(spilled.weights, spilledDefault.weights);
+  assert.ok(spilled.tps > spilledDefault.tps);
+});
+
+test('baseline overhead replaces the lump and leaves the weight factor in place', () => {
+  const raised = profile({ baselineOverheadGB: 3 });
+
+  approx(raised.weights, expectedWeights);
+  approx(raised.overhead, 3);
+  approx(raised.maxContext, (24 - expectedWeights - 3) / expectedKvPerTokenGB);
+});
+
+test('disabling CPU offload withholds the spill ceiling and keeps a resident ceiling', () => {
+  const resident = profile({ cpuOffloadMode: 'disabled' });
+  const residentDefault = profile();
+
+  assert.equal(resident.cpuOffloadPossible, false);
+  approx(resident.tps, residentDefault.tps);
+  approx(resident.total, residentDefault.total);
+  approx(resident.idealTps, residentDefault.idealTps);
+
+  const capacityGB = expectedKv + 1.5 + expectedWeights * 0.5;
+  const spilled = profile({ capacityGB, cpuOffloadMode: 'disabled' });
+  const spilledDefault = profile({ capacityGB });
+
+  assert.equal(spilled.cpuOffloadPossible, false);
+  assert.equal(spilled.tps, null);
+  assert.equal(spilled.aggregateTps, null);
+  approx(spilled.total, spilledDefault.total);
+  approx(spilled.overhead, spilledDefault.overhead);
+  assert.ok(spilledDefault.tps > 0);
+});
