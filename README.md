@@ -25,12 +25,14 @@ npm run dev      # http://localhost:5173
 npm run build    # production bundle in dist/
 ```
 
-The entire application — state, calculations, recommendation engine, charts, and
-UI — lives in a single component file, [`src/App.jsx`](src/App.jsx). Everything
-else is standard Vite + Tailwind scaffolding.
+State, the recommendation engine, charts, and UI live in [`src/App.jsx`](src/App.jsx).
+The calculation engine is [`src/calculations.js`](src/calculations.js). Hardware,
+model, quantization, KV precision, and context-step catalogs live in
+[`src/data/`](src/data/). Everything else is standard Vite + Tailwind scaffolding.
 
 To drop it into an existing project or an online sandbox (StackBlitz,
-CodeSandbox), copy `src/App.jsx` and install its three runtime dependencies:
+CodeSandbox), copy `src/App.jsx`, `src/calculations.js`, and `src/data/`, and
+install its three runtime dependencies:
 
 ```bash
 npm install react react-dom lucide-react recharts
